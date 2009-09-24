@@ -236,6 +236,7 @@ sub stats {
 		};
 		
 	}
+	$stats = { %Queue::PQ::Single::ZERO_STATS } unless $stats;
 	$stats->{cmd} = $self->{stat}{cmd};
 	$stats->{queues} = [ $self->queues ];
 	

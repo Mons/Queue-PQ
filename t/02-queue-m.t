@@ -119,8 +119,8 @@ is $q->stats->{delayed}, 1;
 
 ok $q->ack(0,$dst => $_), "ack $_" for 55,99;
 
-ok $q->bury(0,$dst => 33),'buried';
-ok $q->bury(0,$dst => 77),'buried';
+ok $q->bury(0,$dst => 33), 'buried 33';
+ok $q->bury(0,$dst => 77), 'buried 77';
 
 is scalar $q->take(0,$dst), undef, 'buried not takeable';
 
@@ -132,11 +132,11 @@ is $q->stats(0,$dst)->{buried}, 1;
 
 ok $q->delete(0,$dst => 999),'delete delayed';
 
-is $q->stats(0,$dst)->{delayed}, 0;
+is $q->stats(0,$dst)->{delayed}, 0, 'delayed count = 0';
 
 ok $q->delete(0,$dst => 33),'delete buried';
 
-is $q->stats(0,$dst)->{buried}, undef; # since queue is empty, it's dropped
+is $q->stats(0,$dst)->{buried}, undef, 'buried count = undef'; # since queue is empty, it's dropped
 
 #print Dump [ $q ];
 

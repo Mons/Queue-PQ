@@ -131,7 +131,37 @@ my $stats = $q->stats->{buried};
 is $q->stats->{$_}, 0, "$_ = 0" for qw(ready delayed buried taken);
 
 # Empty queue
-# print Dump [ $q ];
+
+{
+	#Test emptiness
+	my $i = 33;
+	is $q->put( $pri, 'j11',0, $i ), $i, 'put';
+	is $q->stats->{ready}, 1, 'ready=1';
+	ok !$q->empty, 'not empty with ready';
+	ok $q->take, 'take';
+	is $q->stats->{taken}, 1, 'taken=1';
+	ok !$q->empty, 'not empty with taken';
+	ok $q->delete($i), 'delete';
+	is $q->stats->{taken}, 1, 'taken=1';
+	ok !$q->empty, 'not empty with taken/deleted';
+	ok $q->update($i), 'update/restore';
+	is $q->stats->{taken}, 1, 'taken=1';
+	ok !$q->empty, 'not empty with taken/restored';
+	ok $q->requeue($i), 'requeue';
+	is $q->stats->{ready}, 1, 'ready=1';
+	ok !$q->empty, 'not empty with ready/requeued';
+	ok $q->take, 'take';
+	ok $q->bury($i), 'bury';
+	is $q->stats->{buried}, 1, 'buried=1';
+	ok !$q->empty, 'not empty with buried';
+	is $q->dig($pri), 1, 'dig';
+	is $q->stats->{ready}, 1, 'ready=1';
+	ok !$q->empty, 'not empty with digged';
+	ok $q->delete($i), 'delete';
+}
+
+# Empty queue
+# print Dump [ $q ];exit;
 
 #print Dump [ $q ];
 
@@ -161,6 +191,80 @@ ok $j = $q->take() ,'take';
 is $j->{id},33,'taken 33';
 ok $q->requeue(33), 'requeue';
 ok $q->delete( $_ ), "delete $_" for 33,22,11;
+
+
+{
+	# Test for purge
+	my $id = 33;
+	for my $action (qw(release requeue bury ack)) {
+		my $x = $q->put($pri,'data',0,$id);
+		is $x, $id, 'ins '.$id;
+		$taken = $q->take;
+		is $taken->{id}, $id, 'taken '.$id;
+		is $taken->{data}, 'data', 'data ok';
+		ok $q->delete($id), 'delete';
+		ok !$q->delete($id), 'delete again fail';
+		is $taken->{state}, 'deleted', 'queue deletion';
+		ok $q->$action($id), $action;
+		ok !$q->take, 'no more jobs';
+		is $q->stats->{$_}, 0, "$_ = 0" for qw(ready delayed buried taken);
+		undef $taken;
+	}
+	{
+		my $x = $q->put($pri,'data',0,$id);
+		$q->put($pri,'some trash',0,11);
+		$q->put($pri,'some trash',0,22);
+		$taken = $q->take;
+		#warn Dump $taken;
+		is $taken->{id}, $id, 'taken '.$id;
+		ok $q->delete($id), 'delete';
+		ok !$q->delete($id), 'delete again fail';
+		#warn Dump $taken;
+		is $taken->{state}, 'deleted', 'queue deletion';
+		ok $q->update( $id, $pri+1, 'up', 0 ), 'update ok';
+		#warn Dump $taken;
+		is $taken->{state}, 'taken', 'deletion cancelled';
+		ok $q->update( $id, $pri, 'up', 0 ), 'update ok';
+		#warn Dump $taken;
+		is $taken->{state}, 'taken', 'deletion cancelled';
+		ok $q->update( $id, $pri+1, 'up', 0 ), 'update ok';
+		#warn Dump $taken;
+
+=for rem
+		ok $q->delete($id), 'delete';
+		is $taken->{state}, 'deleted', 'queue deletion';
+		ok $q->update( $id, $pri, 'up', 0 ), 'update ok';
+		ok $q->release($id), 'released';
+		is $taken->{state}, 'ready', 'deletion cancelled';
+		$taken = $q->take;
+		is $taken->{id}, $id, 'taken '.$id;
+		ok $q->delete($id), 'delete';
+		ok !$q->delete($id), 'delete again fail';
+		ok $q->update( $id, $pri, 'up', 0 ), 'update ok';
+=cut
+
+		is $taken->{data}, 'up', 'up data ok';
+		ok $q->release($id,0.1), 'release delayed ok';
+		my $req = $q->take;
+		$q->requeue($req->{id});
+		#warn Dump $taken;
+		sleep 0.05;
+		ok $q->update( $id, $pri, 'upd', 0 ), 'update delayed ok';
+		#warn Dump $taken;
+		sleep 0.06;
+		ok $q->delete($_), "delete $_" for 11,22;
+		$taken = $q->take;
+		#warn Dump $taken;
+		ok $q->requeue($id), 'requeue ok';
+		#warn Dump $taken;
+		
+		is $q->stats->{ready}, 1, 'have 1 ready job';
+		ok $q->delete($id), 'delete';
+		ok !$q->delete($id), 'delete again fail';
+		is $q->stats->{total},0, 'no more jobs';
+		undef $taken;
+	}
+}
 
 #print Dump $q;
 

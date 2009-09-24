@@ -5,6 +5,11 @@ use Carp;
 use Data::Dumper;
 use Time::HiRes qw(time);
 
+our %ZERO_STATS = (
+	prios    => [],
+	map { $_ => 0 } qw( urgent ready delayed buried taken active total ),
+);
+
 sub nextval {
 	my $self = shift;
 	my $id;
@@ -86,31 +91,42 @@ sub stats {
 		delayed => $delayed,
 		buried  => $buried,
 		taken   => $taken,
-		active  => $ready + $taken + $delayed + $buried,
+		active  => $ready + $taken + $delayed,
+		total   => $ready + $taken + $delayed + $buried,
 	};
 }
 
 sub empty {
 	my $self = shift;
-	$self->stats->{active} == 0 ? 1 : 0;
+	$self->stats->{total} == 0 ? 1 : 0;
 }
 
 sub _add_to_tail {
 	my $self = shift;
 	my $j    = shift;
 	my $pri  = $j->{pri};
+	if (!$self->{q}{$pri} or @{$self->{q}{$pri}} == 0) {
+		$self->{q}{$pri} = [];
+		$self->{o}{$pri} = 0;
+	}
 	$self->_collect_delayed(0,$pri);
 	push @{ $self->{q}{$pri} },$j;
 	$j->{'.'} = $#{ $self->{q}{$pri} } - $self->{o}{$pri};
+	$j->{state} = 'ready';
 	return;
 }
 sub _add_to_head {
 	my $self = shift;
 	my $j    = shift;
 	my $pri  = $j->{pri};
+	if (!$self->{q}{$pri} or @{$self->{q}{$pri}} == 0) {
+		$self->{q}{$pri} = [];
+		$self->{o}{$pri} = 0;
+	}
 	unshift @{ $self->{q}{$pri} },$j;
 	$self->{o}{$pri}++;
 	$j->{'.'} = -$self->{o}{$pri};
+	$j->{state} = 'ready';
 	return;
 }
 
@@ -151,11 +167,8 @@ sub _add {
 		$id = $self->nextval;
 		exists $self->{j}{$id} and die "Internal nextval generated duplicate id: $id";
 	}
+	#warn "Add: $id / ".(exists $self->{taken}{$id} ? $self->{taken}{$id}{state} : 'not taken');
 	
-	unless ($self->{q}{$pri}) {
-		$self->{q}{$pri} = [];
-		$self->{o}{$pri} = 0;
-	}
 	
 	$self->{j}{$id} = {
 		id => $id,
@@ -170,7 +183,6 @@ sub _add {
 		if ($cmd eq 'put') {
 			$self->_add_to_tail($self->{j}{$id});
 		} elsif ($cmd eq 'push') {
-			#my $ofs = @{ $self->{q}{$pri} } ? $self->{q}{$pri}[0]{'.'} - 1 : 0;
 			$self->_add_to_head($self->{j}{$id});
 		} else {
 			die "Internal error: wrong command $cmd";
@@ -204,7 +216,6 @@ sub _collect_delayed {
 			$self->{o}{$pri} = 0;
 		}
 
-		$ready->{state} = 'ready';
 		delete $ready->{at};
 		$self->_add_to_tail($ready);
 
@@ -250,6 +261,7 @@ sub take {
 		next unless defined $taken;
 		
 		$taken->{state} = 'taken';
+		#warn "take: $taken->{id}: $taken->{state}";
 		delete $taken->{'.'};
 		$self->{taken}{$taken->{id}} = $taken;
 		return $taken;
@@ -261,8 +273,8 @@ sub ack {
 	my $self = shift;
 	my $id = shift;
 	my $j = $self->{j}{$id};
-	exists $self->{j}{$id} or warn("Not found $id"),return;
-	exists $self->{taken}{$id} or warn("Not taken $id"),return;
+	exists $self->{j}{$id} or warn("Ack failed: Not found $id"),return;
+	exists $self->{taken}{$id} or warn("Ack failed: Not taken $id"),return;
 	delete $self->{taken}{$id};
 	delete $self->{j}{$id};
 	if ( $self->{q}{$j->{pri}} and !@{ $self->{q}{$j->{pri}} }) {
@@ -273,23 +285,31 @@ sub ack {
 	#warn Dumper $self->{j}{$id};
 }
 
+sub _purge {
+	my $self = shift;
+	my $id = shift;
+	#warn "Purge $id deleted";
+	delete $self->{taken}{$id};
+	delete $self->{j}{$id};
+	return $id;
+}
+
 sub release {
 	my $self = shift;
 	my $id = shift;
 	my $delay = shift;
-	exists $self->{j}{$id} or warn("Not found $id"),return;
-	exists $self->{taken}{$id} or warn("Not taken $id"),return;
+	exists $self->{j}{$id} or warn("Release failed: Not found $id"),return;
+	exists $self->{taken}{$id} or warn("Release failed: Not taken $id"),return;
 	my $j = $self->{taken}{$id};
-	$j->{state} = 'ready';
+	$j->{state} eq 'deleted' and return $self->_purge($id);
 	if (defined $delay) {
 		$j->{at} = time + $delay;
 		$self->_add_to_delay($j);
 	} else {
 		$self->_add_to_head($j);
 	}
-	
 	delete $self->{taken}{$id};
-	return 1;
+	return $id;
 }
 
 sub requeue {
@@ -299,7 +319,7 @@ sub requeue {
 	exists $self->{j}{$id} or warn("Not found $id"),return;
 	exists $self->{taken}{$id} or warn("Not taken $id"),return;
 	my $j = $self->{taken}{$id};
-	$j->{state} = 'ready';
+	$j->{state} eq 'deleted' and return $self->_purge($id);
 	if (defined $delay) {
 		$j->{at} = time + $delay;
 		$self->_add_to_delay($j);
@@ -307,6 +327,7 @@ sub requeue {
 		$self->_add_to_tail($j);
 	}
 	delete $self->{taken}{$id};
+	return $id;
 }
 
 sub bury {
@@ -315,14 +336,29 @@ sub bury {
 	exists $self->{j}{$id} or warn("Not found $id"),return;
 	exists $self->{taken}{$id} or warn("Not taken $id"),return;
 	my $j = delete $self->{taken}{$id};
+	$j->{state} eq 'deleted' and return $self->_purge($id);
 	$j->{state} = 'buried';
 	delete $j->{'.'};
 	my $pri = $j->{pri};
 	push @{ $self->{b}{$pri}||=[] },$j;
-	return 1;
+	return $id;
 }
 
-sub dig  { croak "Not implemented: dig"  }
+sub dig {
+	my $self = shift;
+	my $pri = shift;
+	my $N = shift || 1;
+	my $have = @{ $self->{b}{$pri} || [] };
+	if ( $N > $have ) {
+		$N = $have
+	} else {
+		$have = $N;
+	}
+	while ($N--) {
+		$self->_add_to_tail(shift @{ $self->{b}{$pri} });
+	}
+	return $have;
+}
 
 sub peek {
 	my $self = shift;
@@ -334,60 +370,93 @@ sub peek {
 sub delete : method {
 	my $self = shift;
 	my $id = shift;
-	exists $self->{j}{$id} or warn("Not found $id"),return;
+	exists $self->{j}{$id}
+		#or warn("Can't delete: Not found $id"),
+		or $@ = "Can't delete: Not found $id" and
+		return;
 	my $j = $self->{j}{$id};
+	if ($j->{state} eq 'deleted') {
+		#warn("Can't delete: Already deleted $id");
+		return;
+	}
 	my $pri = $j->{pri};
 	if ($j->{state} eq 'ready') {
+		use R::Dump;
+		warn Dump [ $j,$self->{o}{$pri} ] if !defined $self->{o}{$pri} or !defined $j->{'.'};
 		my $idx = $j->{'.'} + $self->{o}{$pri};
 		if ( defined $self->{q}{$pri}[ $idx ] and $self->{q}{$pri}[ $idx ] == $j ) {
 			$self->{q}{$pri}[ $idx ] = undef;
 			#splice @{ $self->{q}{$pri} }, $idx, 1;
 			#$self->{o}{$pri}--;
 		} else {
-			die "Bad index $idx / $j->{'.'} $self->{o}{$pri} $j <> $self->{q}{$pri}[ $idx ]";
+			die "Bad index $idx / j.=$j->{'.'}+o.$pri=$self->{o}{$pri} $j <=> $self->{q}{$pri}[ $idx ]";
 		}
+		delete $self->{j}{$id};
 	}
 	elsif ( $j->{state} eq 'delayed') {
 		# TODO: use offsets
 		$self->{d}{$pri} = [ grep $_->{id} != $j->{id}, @{ $self->{d}{$pri} } ];
+		delete $self->{j}{$id};
 	}
 	elsif ( $j->{state} eq 'buried') {
 		# TODO: use offsets
 		$self->{b}{$pri} = [ grep $_->{id} != $j->{id}, @{ $self->{b}{$pri} } ];
+		delete $self->{j}{$id};
+	}
+	elsif ( $j->{state} eq 'taken' ) {
+		#warn "$id: $j->{state} => deleted";
+		$j->{state} = 'deleted';
+		# Don't purge till return
+		#delete $self->{j}{$id};
 	}
 	else {
 		die "Bad job state $j->{state}";
 	}
-	delete $self->{j}{$id};
 	$self->_vacuum($pri);
-	return 1;
+	return $id;
 }
 
 sub update {
 	my $self = shift;
 	my $id = shift;
 
-	return unless exists $self->{j}{$id};
+	exists $self->{j}{$id}
+		or warn ("Can't update nx id=$id"),
+		return
+	;
 
 	my $pri  = int shift;
 	my $job  = shift;
 	
 	
 	my $j = $self->{j}{$id};
+	#if (exists $self->{taken}{$id}) {
+	#	warn "Updating taken job $id / $j->{state}";
+	#}
 	my $old = $self->{j}{$id}{pri};
 	if ($old != $pri) {
-		my $idx = $j->{'.'} + $self->{o}{$old};
-		if ( $self->{q}{$old}[ $idx ] == $j ) {
-			$self->{q}{$old}[ $idx ] = undef;
-			
-			$j->{pri} = $pri;
-			$self->_add_to_tail($j);
-			
-			$self->_vacuum($old);
+		if ($j->{state} eq 'taken' or $j->{state} eq 'deleted') {
+			#warn "Updating $j->{state} job with piority change";
 		} else {
-			die "Bad index";
+			my $idx = $j->{'.'} + $self->{o}{$old};
+			if ( $self->{q}{$old}[ $idx ] == $j ) {
+				$self->{q}{$old}[ $idx ] = undef;
+				
+				$j->{pri} = $pri;
+				$self->_add_to_tail($j);
+				$self->_vacuum($old);
+			} else {
+				die "Bad index";
+			}
 		}
-		
+	}
+	if ($j->{state} eq 'deleted' ) {
+		if (exists $self->{taken}{$id}) {
+			$j->{state} = 'taken';
+			#warn "$id: deleted => $j->{state}";
+		} else {
+			die "State deleted but not taken";
+		}
 	}
 	$j->{data} = $job;
 	return 1;
